@@ -60,6 +60,18 @@ def create_lka_msg(packer, CAN: CanBus, lat_active: bool, hud_control,
   return addr, bytes(dat), bus
 
 
+# BluePilot explorer-st-angle: last-line guard against 11-bit wrap-around. The CAN packer masks
+# out-of-range raw values instead of saturating them, so a wire path angle below -0.5 rad (or above
+# 0.5235) would be read by the PSCM as a large angle in the OPPOSITE direction. Saturate to the DBC
+# range here so no caller can ever send a wrapped value. No effect on in-range values.
+_LAT_CTL_PATH_ANGLE_WIRE_MIN = -0.5
+_LAT_CTL_PATH_ANGLE_WIRE_MAX = 0.5235
+
+
+def _clip_path_angle_wire(path_angle: float) -> float:
+  return float(min(_LAT_CTL_PATH_ANGLE_WIRE_MAX, max(_LAT_CTL_PATH_ANGLE_WIRE_MIN, path_angle)))
+
+
 def create_lat_ctl_msg(packer, CAN: CanBus, lat_active: bool, ramp_type: int, precision_type: int,
                        path_offset: float, path_angle: float, curvature: float, curvature_rate: float):
   """
@@ -84,7 +96,7 @@ def create_lat_ctl_msg(packer, CAN: CanBus, lat_active: bool, ramp_type: int, pr
     "LatCtlRampType_D_Rq": ramp_type,           # Ramp speed: 0=Slow, 1=Medium, 2=Fast, 3=Immediate [0|3]
     "LatCtlPrecision_D_Rq": precision_type,     # Precision: 0=Comfortable, 1=Precise, 2/3=NotUsed [0|3]
     "LatCtlPathOffst_L_Actl": path_offset,      # Path offset [-5.12|5.11] meter
-    "LatCtlPath_An_Actl": path_angle,           # Path angle [-0.5|0.5235] radians
+    "LatCtlPath_An_Actl": _clip_path_angle_wire(path_angle),           # Path angle [-0.5|0.5235] radians
     "LatCtlCurv_NoRate_Actl": curvature_rate,   # Curvature rate [-0.001024|0.00102375] 1/meter^2
     "LatCtlCurv_No_Actl": curvature,            # Curvature [-0.02|0.02094] 1/meter
   }
@@ -111,7 +123,7 @@ def create_lat_ctl2_msg(packer, CAN: CanBus, mode: int, ramp_type: int, precisio
     "LatCtlRampType_D_Rq": ramp_type,           # 0=Slow, 1=Medium, 2=Fast, 3=Immediate [0|3]
     "LatCtlPrecision_D_Rq": precision_type,     # 0=Comfortable, 1=Precise, 2/3=NotUsed [0|3]
     "LatCtlPathOffst_L_Actl": path_offset,      # [-5.12|5.11] meter
-    "LatCtlPath_An_Actl": path_angle,           # [-0.5|0.5235] radians
+    "LatCtlPath_An_Actl": _clip_path_angle_wire(path_angle),           # [-0.5|0.5235] radians
     "LatCtlCurv_No_Actl": curvature,            # [-0.02|0.02094] 1/meter
     "LatCtlCrv_NoRate2_Actl": curvature_rate,   # [-0.001024|0.001023] 1/meter^2
     "HandsOffCnfm_B_Rq": 0,                     # 0=Inactive, 1=Active [0|1]

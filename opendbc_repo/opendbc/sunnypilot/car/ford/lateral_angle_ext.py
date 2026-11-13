@@ -74,8 +74,20 @@ _EXPEDITION_CARS = frozenset({
 
 
 # DBC ``LatCtlPath_An_Actl`` (rad) — panda safety uses the same in ``ford.h``; PSCM enforces in firmware.
+# NOTE: these are WIRE-domain limits. carcontroller.py negates path_angle before packing
+# (``-lat.path_angle``), so the OP-domain value computed in this file must stay inside the MIRRORED
+# range [-FORD_DBC_PATH_ANGLE_MAX, -FORD_DBC_PATH_ANGLE_MIN] = [-0.5235, +0.5].
 FORD_DBC_PATH_ANGLE_MIN = -0.5
 FORD_DBC_PATH_ANGLE_MAX = 0.5235
+# BluePilot explorer-st-angle: OP-domain (pre-negation) limits. Before this fix the OP value was
+# clamped to [-0.5, +0.5235]; a hard LEFT command of +0.5235 became -0.5235 on the wire, below the
+# signal's -0.5 floor. The CAN packer masks the raw value to 11 bits, so raw -47 wrapped to 2001 and
+# the PSCM read +0.5005 rad -- a full RIGHT path angle -- for as long as the command sat between
+# +0.5 and +0.5235 (sharp/accelerating left-turn exits at low speed). ford.h blocks only the first
+# wrapped frame (ROC jump) and then admits the rest, because desired_path_angle_last is updated even
+# on a violation and +0.5005 is inside the value range.
+_OP_PATH_ANGLE_MIN = -FORD_DBC_PATH_ANGLE_MAX  # -0.5235 rad (right), wire +0.5235
+_OP_PATH_ANGLE_MAX = -FORD_DBC_PATH_ANGLE_MIN  # +0.5    rad (left),  wire -0.5
 
 
 # PSCM d_ref (m) vs speed (m/s) — 6 points; above ~55.6 m/s use plateau + optional cap to 5 m.
@@ -449,8 +461,9 @@ class LateralAngleExt:
     # That caused a positive-feedback flat-line: under-steer → CtrSat → path_angle frozen → more under-steer.
     # Use DBC-limit proximity instead: only block when path_angle is already near the ±0.5 rad CAN limits,
     # which is the only condition where the anti-snap unwind rate cap makes physical sense.
-    _dbc_sat = (self.path_angle_last >= FORD_DBC_PATH_ANGLE_MAX * 0.90 or
-                self.path_angle_last <= FORD_DBC_PATH_ANGLE_MIN * 0.90)
+    # BluePilot explorer-st-angle: thresholds use the OP-domain (mirrored) limits, see _OP_PATH_ANGLE_*.
+    _dbc_sat = (self.path_angle_last >= _OP_PATH_ANGLE_MAX * 0.90 or
+                self.path_angle_last <= _OP_PATH_ANGLE_MIN * 0.90)
     _in_hard_sat = _pscm_lim >= 2 or _dbc_sat
     # BluePilot: per-call delta threshold. The original 0.002 was authored 2026-05-07 on
     # bp-sid-simple (9c3d000fd), which ran STEER_STEP=1 (true 100Hz, switched 2026-04-22) -- so it
@@ -549,7 +562,9 @@ class LateralAngleExt:
     elif _pscm_lim >= 1:  # LimitClose (F150/non-angle-mode only): block increases only
       path_angle = float(clip(path_angle, -abs(self.path_angle_last), abs(self.path_angle_last)))
 
-    path_angle = min(FORD_DBC_PATH_ANGLE_MAX, max(FORD_DBC_PATH_ANGLE_MIN, path_angle))
+    # BluePilot explorer-st-angle: clamp in the OP domain (mirrored DBC range) -- was
+    # min(FORD_DBC_PATH_ANGLE_MAX, max(FORD_DBC_PATH_ANGLE_MIN, path_angle)), which let +0.5235 wrap.
+    path_angle = min(_OP_PATH_ANGLE_MAX, max(_OP_PATH_ANGLE_MIN, path_angle))
 
     # Soft ROC limit — unconditional, slightly tighter than ford.h, applied before the
     # hardware bypass in ford.h is re-enabled.  Lets us observe whether the limit would

@@ -389,3 +389,43 @@ class TestLaneCenteringIntegration(unittest.TestCase):
 
 if __name__ == '__main__':
   unittest.main()
+
+
+class TestPathAngleWireRange(unittest.TestCase):
+  """BluePilot explorer-st-angle: the OP-domain path_angle is negated before packing, so it must be
+  clamped to the MIRRORED DBC range, and the packer input must never leave the DBC range (the CAN
+  packer masks to 11 bits instead of saturating, which turns -0.5235 into +0.5005 on the PSCM)."""
+
+  def _pscm_reads(self, wire_value):
+    from opendbc.can import CANPacker
+    from opendbc.can.parser import get_raw_value
+    from opendbc.car.ford.fordcan import CanBus
+    from opendbc.sunnypilot.car.ford import fordcan_ext
+    packer = CANPacker('ford_lincoln_base_pt')
+    sig = packer.dbc.name_to_msg['LateralMotionControl'].sigs['LatCtlPath_An_Actl']
+    CAN = CanBus(None, fingerprint={0: {}, 1: {}, 2: {}, 4: {}})
+    _, dat, _ = fordcan_ext.create_lat_ctl_msg(packer, CAN, True, 2, 1, 0.0, wire_value, 0.0, 0.0)
+    return get_raw_value(dat, sig) * 0.0005 - 0.5
+
+  def test_builder_never_wraps(self):
+    for wire in (-0.6, -0.5235, -0.5, 0.0, 0.5, 0.5235, 0.6):
+      reads = self._pscm_reads(wire)
+      self.assertAlmostEqual(reads, min(0.5235, max(-0.5, wire)), places=3)
+
+  def test_hard_left_command_stays_left_on_wire(self):
+    CP = _explorer_cp()
+    ext = _Harness(CP)
+    ext.human_turn_detector = _ForcedDetector(False)
+    ext.model = _Model()
+    # Sit just below saturation, then ask for a much sharper LEFT turn at low speed (no deviation clip
+    # below 9 m/s, soft ROC 0.055 rad/call) -- the step lands above +0.5 before the fix.
+    ext.path_angle_last = 0.465
+    v = 5.0
+    k = 0.15
+    cs = _CS(vEgoRaw=v, vEgo=v, yawRate=-k * v)
+    ext.model.orientationRate.z = [k * v] * 33
+    for _ in range(10):
+      lat = ext.update_angle_strategy(_CC(latActive=True), cs, _Actuators(curvature=k), CP)
+      self.assertLessEqual(lat.path_angle, 0.5 + 1e-9)
+      self.assertGreaterEqual(lat.path_angle, -0.5235 - 1e-9)
+      self.assertLess(self._pscm_reads(-lat.path_angle), 0.0)  # left command must read as left (negative) on the wire
