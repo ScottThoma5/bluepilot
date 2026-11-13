@@ -57,6 +57,14 @@ class LongitudinalExt:
     # Thresholds
     self.MAX_URBAN_SPEED_MPH = 45.0
     self.following_accel_ROC = 0.002  # max accel change per scan in following mode
+    # BluePilot explorer-st-smooth: no-lead handling above the 50 mph deadband.
+    # Before: no lead -> accel clamped to exactly 0 (no braking at all), then on dropping below 45 mph
+    # the full openpilot request was released at once (the "slam" at lights / sudden decel).
+    # After: allow gentle no-lead decel down to a floor, slewed at a modest rate, so the car starts
+    # slowing early and the hand-off below 45 mph starts from a value close to what openpilot wants.
+    # The floor still caps how hard a false model slow-down can brake at highway speed with no lead.
+    self.no_lead_accel_floor = -1.0   # m/s^2, most decel BP allows with no lead (was 0.0)
+    self.no_lead_accel_ROC = 0.02     # m/s^2 per 20 ms scan = 1.0 m/s^3 (was 0.002 = 0.1 m/s^3)
 
     # Brake hysteresis thresholds
     self.brake_actuate_target = -0.14   # engage brakes below this accel
@@ -193,8 +201,10 @@ class LongitudinalExt:
       if lead is None:
         max_follow_gas = op_gas
         min_follow_gas = op_gas
+        # BluePilot explorer-st-smooth: was max = min = 0 (hard no-brake clamp). Keep the 0 ceiling
+        # (no-lead propulsion still comes only from gas, as before) but allow decel down to the floor.
         max_follow_accel = 0
-        min_follow_accel = 0
+        min_follow_accel = self.no_lead_accel_floor
 
       # Apply BP gas and accel targets
       bp_gas = clip(op_gas, min_follow_gas, max_follow_gas)
@@ -203,7 +213,10 @@ class LongitudinalExt:
       # Rate limit downward accel changes (dampen initial brake hit)
       # Skip rate limit if imminent collision risk
       if ttc_sec > 8.0 and lead_time_sec > 0.5:
-        bp_accel = clip(bp_accel, self.bp_accel_last - self.following_accel_ROC, 999)
+        # BluePilot explorer-st-smooth: use the faster no-lead ROC when there is no lead, so the
+        # no-lead floor above is actually reachable (following_accel_ROC alone is 0.1 m/s^3).
+        accel_roc = self.following_accel_ROC if lead else self.no_lead_accel_ROC
+        bp_accel = clip(bp_accel, self.bp_accel_last - accel_roc, 999)
 
       # BP brake/precharge hysteresis
       if bp_accel < self.brake_actuate_target:

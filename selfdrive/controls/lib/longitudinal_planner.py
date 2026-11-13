@@ -27,7 +27,29 @@ MIN_ALLOW_THROTTLE_SPEED = 2.5
 _A_TOTAL_MAX_V = [1.7, 3.2]
 _A_TOTAL_MAX_BP = [20., 40.]
 
-def get_max_accel(v_ego):
+# BluePilot explorer-st-smooth: Ford-only launch accel ceiling.
+# Stock table caps planned accel at 1.6 m/s^2 from a stop and 1.2 m/s^2 at ~22 mph, which feels
+# sluggish next to Ford ACC pulling away from a light. Raise only the low-speed end; highway values
+# are unchanged. 2.0 m/s^2 equals Ford CarControllerParams.ACCEL_MAX and the ford.h panda max
+# (no safety limit is touched). The existing 0.05/step accel_clip slew below still jerk-limits the ramp.
+FORD_A_CRUISE_MAX_VALS = [2.0, 1.5, 0.8, 0.6]
+
+# BluePilot explorer-st-smooth: e2e (Experimental) tweaks, Ford only.
+# Launch assist: when a tracked lead ahead is pulling away and we are slow, the model's own launch
+# accel is often far softer than the MPC (which still respects the lead's distance). Move the e2e
+# term part-way toward the MPC so we follow the departing car more like Ford ACC does.
+LAUNCH_ASSIST_MAX_V = 8.0      # m/s (~18 mph): only while launching / creeping
+LAUNCH_ASSIST_MAX_DREL = 40.0  # m: lead must be close enough to be "the car in front at the light"
+LAUNCH_ASSIST_BLEND = 0.5      # 0 = pure model (stock), 1 = pure MPC
+# No-lead e2e decel slew: with no lead tracked, limit how fast the *model* term can pull accel down.
+# Short model dips (phantom brakes) get filtered; a sustained stop request still arrives, just ramped.
+# 0.1 m/s^2 per 50 ms step = 2.0 m/s^3. The MPC (lead / FCW) term is never limited by this.
+E2E_NO_LEAD_DECEL_STEP = 0.1
+
+
+def get_max_accel(v_ego, CP=None):
+  if CP is not None and CP.brand == "ford":
+    return np.interp(v_ego, A_CRUISE_MAX_BP, FORD_A_CRUISE_MAX_VALS)
   return np.interp(v_ego, A_CRUISE_MAX_BP, A_CRUISE_MAX_VALS)
 
 def get_coast_accel(pitch):
@@ -59,6 +81,7 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     self.a_desired = init_a
     self.v_desired_filter = FirstOrderFilter(init_v, 2.0, self.dt)
     self.prev_accel_clip = [ACCEL_MIN, ACCEL_MAX]
+    self.prev_e2e_accel = 0.0  # BluePilot explorer-st-smooth: last (shaped) e2e accel term
     self.output_a_target = 0.0
     self.output_should_stop = False
 
@@ -110,7 +133,7 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     # No change cost when user is controlling the speed, or when standstill
     prev_accel_constraint = not (reset_state or sm['carState'].standstill)
 
-    accel_clip = [ACCEL_MIN, get_max_accel(v_ego)]
+    accel_clip = [ACCEL_MIN, get_max_accel(v_ego, self.CP)]
     steer_angle_without_offset = sm['carState'].steeringAngleDeg - sm['liveParameters'].angleOffsetDeg
     accel_clip = limit_accel_in_turns(v_ego, steer_angle_without_offset, accel_clip, self.CP)
 
@@ -159,6 +182,24 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
                                                                         action_t=action_t, vEgoStopping=self.CP.vEgoStopping)
     output_a_target_e2e = sm['modelV2'].action.desiredAcceleration
     output_should_stop_e2e = sm['modelV2'].action.shouldStop
+
+    # BluePilot explorer-st-smooth: shape the model (e2e) term on Ford. See constants at top of file.
+    if self.CP.brand == "ford":
+      lead_one = sm['radarState'].leadOne
+      if reset_state:
+        self.prev_e2e_accel = float(sm['carState'].aEgo)
+      # Launch assist: lead ahead, close, and pulling away, we are slow, and the model is not asking to stop
+      # (lead moving, not slower than us by more than 1 m/s; blend fades out between 6 and 8 m/s so the
+      # hand-back to the pure model term is gradual rather than a step)
+      if (lead_one.status and v_ego < LAUNCH_ASSIST_MAX_V and lead_one.dRel < LAUNCH_ASSIST_MAX_DREL and
+          lead_one.vLead > max(v_ego - 1.0, 1.0) and not output_should_stop_e2e and
+          output_a_target_mpc > output_a_target_e2e):
+        blend = LAUNCH_ASSIST_BLEND * float(np.interp(v_ego, [LAUNCH_ASSIST_MAX_V - 2.0, LAUNCH_ASSIST_MAX_V], [1.0, 0.0]))
+        output_a_target_e2e += blend * (output_a_target_mpc - output_a_target_e2e)
+      # No-lead decel slew on the e2e term only (lead braking comes from the MPC term, untouched)
+      if not lead_one.status and not reset_state:
+        output_a_target_e2e = max(output_a_target_e2e, self.prev_e2e_accel - E2E_NO_LEAD_DECEL_STEP)
+      self.prev_e2e_accel = float(output_a_target_e2e)
 
     if self.is_e2e(sm):
       output_a_target = min(output_a_target_e2e, output_a_target_mpc)

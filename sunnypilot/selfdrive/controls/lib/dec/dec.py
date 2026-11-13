@@ -317,7 +317,7 @@ class DynamicExperimentalController:
 
     # Slow down scenarios: emergency for high urgency, normal for lower urgency
     if self._has_slow_down:
-      if self._urgency > 0.7:
+      if self._urgency > WMACConstants.SLOW_DOWN_EMERGENCY_URGENCY:  # BluePilot explorer-st-smooth: was 0.7
         # Emergency: immediate blended mode for high urgency stops
         self._mode_manager.request_mode('blended', confidence=1.0, emergency=True)
       else:
@@ -349,7 +349,7 @@ class DynamicExperimentalController:
 
     # Slow down scenarios: emergency for high urgency, normal for lower urgency
     if self._has_slow_down:
-      if self._urgency > 0.7:
+      if self._urgency > WMACConstants.SLOW_DOWN_EMERGENCY_URGENCY:  # BluePilot explorer-st-smooth: was 0.7
         # Emergency: immediate blended mode for high urgency stops
         self._mode_manager.request_mode('blended', confidence=1.0, emergency=True)
       else:
