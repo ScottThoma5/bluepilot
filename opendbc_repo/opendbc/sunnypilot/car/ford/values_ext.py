@@ -9,7 +9,7 @@ from collections import namedtuple
 
 from opendbc.car import structs
 from opendbc.car.docs_definitions import CarParts, Device
-from opendbc.car.ford.values import CAR
+from opendbc.car.ford.values import CAR, FORD_STOCK_ANGLE_LIMITS
 from opendbc.car.lateral import AngleSteeringLimits
 
 ButtonType = structs.CarState.ButtonEvent.Type
@@ -98,6 +98,23 @@ BP_ANGLE_LIMITS = AngleSteeringLimits(
   0.02,  # Max curvature for steering command, m^-1
   _BP_ANGLE_RATE_UP,
   _BP_ANGLE_RATE_DOWN,
+)
+
+# BluePilot: stock curvature-only path (disable_BP_lat_UI on) -- faster UNWIND only.
+# The stock down row ([5, 25], [0.00045, 0.00015] per 20 Hz call) is ~5x stricter than what
+# ford.h allows (FORD_LIMITS: {5, 16, 25} -> {0.0025, 0.0014, 0.00018}, symmetric up/down).
+# After an intersection turn the command sits at the 0.02 cap and then trails the model's
+# unwind by 1-3 s (0.009 1/m per s at 5 m/s), which shows up as a tug in the turn direction;
+# if the exit speed passes 9-10 m/s while it is still trailing, the +/-CURVATURE_ERROR window
+# around the measured (yaw) curvature then latches the command to the car's own yaw rate and
+# ford.h itself forces it back toward measured (11/16 logs, 00000324 t~162 s).
+# Unwind at ~80% of the panda table (and never slower than stock); windup keeps the stock row.
+# Below 25 m/s this stays under ford.h by >= 20% before its own -1 m/s speed fudge and +1 count.
+_STOCK_PATH_UNWIND_RATE = ([5, 16, 25], [0.0020, 0.0011, 0.00015])
+STOCK_PATH_UNWIND_LIMITS = AngleSteeringLimits(
+  FORD_STOCK_ANGLE_LIMITS.STEER_ANGLE_MAX,
+  FORD_STOCK_ANGLE_LIMITS.ANGLE_RATE_LIMIT_UP,
+  _STOCK_PATH_UNWIND_RATE,
 )
 
 

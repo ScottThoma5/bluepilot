@@ -14,6 +14,7 @@ from opendbc.sunnypilot.car.ford.lateral_angle_ext import LateralAngleExt
 from opendbc.sunnypilot.car.ford.longitudinal_ext import LongitudinalExt
 from opendbc.sunnypilot.car.ford.hud_ext import HudExt
 from opendbc.sunnypilot.car.ford import fordcan_ext
+from opendbc.sunnypilot.car.ford.values_ext import STOCK_PATH_UNWIND_LIMITS
 from opendbc.sunnypilot.car.ford.icbm import IntelligentCruiseButtonManagementInterface
 
 LongCtrlState = structs.CarControl.Actuators.LongControlState
@@ -40,14 +41,19 @@ def anti_overshoot(apply_curvature, apply_curvature_last, v_ego):
   return float(np.interp(v_ego, [5, 10], [apply_curvature, output_curvature]))
 
 
-def apply_ford_curvature_limits(apply_curvature, apply_curvature_last, current_curvature, v_ego_raw, steering_angle, lat_active, CP):
+def apply_ford_curvature_limits(apply_curvature, apply_curvature_last, current_curvature, v_ego_raw, steering_angle, lat_active, CP,
+                                limits=None):
   # No blending at low speed due to lack of torque wind-up and inaccurate current curvature
   if v_ego_raw > 9:
     apply_curvature = np.clip(apply_curvature, current_curvature - CarControllerParams.CURVATURE_ERROR,
                               current_curvature + CarControllerParams.CURVATURE_ERROR)
 
   # Curvature rate limit after driver torque limit
-  apply_curvature = apply_std_steer_angle_limits(apply_curvature, apply_curvature_last, v_ego_raw, steering_angle, lat_active, CarControllerParams.ANGLE_LIMITS)
+  # BluePilot: limits defaults to the stock table; the stock bypass path passes STOCK_PATH_UNWIND_LIMITS
+  # (same windup, faster unwind, still inside ford.h).
+  if limits is None:
+    limits = CarControllerParams.ANGLE_LIMITS
+  apply_curvature = apply_std_steer_angle_limits(apply_curvature, apply_curvature_last, v_ego_raw, steering_angle, lat_active, limits)
 
   # Ford Q4/CAN FD has more torque available compared to Q3/CAN so we limit it based on lateral acceleration.
   # Safety is not aware of the road roll so we subtract a conservative amount at all times
@@ -152,7 +158,7 @@ class CarController(CarControllerBase, LateralCurvExt, LateralAngleExt, Longitud
 
         self.apply_curvature_last = apply_ford_curvature_limits(
           apply_curvature, self.apply_curvature_last, current_curvature,
-          CS.out.vEgoRaw, 0., CC.latActive, self.CP)
+          CS.out.vEgoRaw, 0., CC.latActive, self.CP, STOCK_PATH_UNWIND_LIMITS)
         if self.CP.flags & FordFlags.CANFD:
           mode = 1 if CC.latActive else 0
           counter = (self.frame // CarControllerParams.STEER_STEP) % 0x10
