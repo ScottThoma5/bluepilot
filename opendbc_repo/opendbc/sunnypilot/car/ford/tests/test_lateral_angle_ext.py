@@ -429,3 +429,62 @@ class TestPathAngleWireRange(unittest.TestCase):
       self.assertLessEqual(lat.path_angle, 0.5 + 1e-9)
       self.assertGreaterEqual(lat.path_angle, -0.5235 - 1e-9)
       self.assertLess(self._pscm_reads(-lat.path_angle), 0.0)  # left command must read as left (negative) on the wire
+
+
+class TestUnwindClipGainCap(unittest.TestCase):
+  """explorer-st-unwind2: when the >9 m/s deviation clip holds kappa_cmd IN the turn (model wants less
+  turn than measured - CURVATURE_ERROR), path_angle must not apply the >1 high-curvature boost to it
+  (that makes the measured -> command -> measured loop gain > 1). Shadow kappa is unchanged."""
+  V = 12.0
+  MEAS = 0.02  # OP convention (+ = right); yawRate = -kappa * v
+
+  def _run(self, desired, meas=MEAS, v=V, frames=40):
+    CP = _explorer_cp()
+    ext = _Harness(CP)
+    ext.human_turn_detector = _ForcedDetector(False)
+    ext.model = _Model()
+    cs = _CS(vEgoRaw=v, vEgo=v, yawRate=-meas * v)
+    res = None
+    for _ in range(frames):
+      res = ext.update_angle_strategy(_CC(), cs, _Actuators(curvature=desired), CP)
+    return ext, res
+
+  def test_exit_side_clip_uses_unity_gain(self):
+    for sign in (1, -1):
+      ext, res = self._run(0.0, meas=sign * self.MEAS)
+      kappa = sign * (self.MEAS - CarControllerParams.CURVATURE_ERROR)
+      self.assertTrue(ext.bp_curvature_deviation_limited)
+      self.assertAlmostEqual(ext.bp_kappa_cmd, kappa)  # shadow unchanged: still the clipped kappa
+      self.assertAlmostEqual(res.path_angle, kappa * self.V * 1.0, places=6)
+      self.assertLess(abs(res.path_angle), abs(kappa * self.V * 1.3))
+
+  def test_reversal_past_straight_also_capped(self):
+    ext, res = self._run(-0.01)
+    self.assertAlmostEqual(res.path_angle, (self.MEAS - CarControllerParams.CURVATURE_ERROR) * self.V, places=6)
+
+  def test_entry_side_clip_keeps_boost(self):
+    # model wants MORE turn than the clip allows: the existing boost is untouched
+    ext, res = self._run(0.08)
+    kappa = self.MEAS + CarControllerParams.CURVATURE_ERROR
+    self.assertAlmostEqual(ext.bp_kappa_cmd, kappa)
+    self.assertAlmostEqual(res.path_angle, kappa * self.V * 1.3, places=6)
+
+  def test_below_clip_speed_unchanged(self):
+    # no deviation clip below 9 m/s -> no cap; path_angle follows the (blended) request with the boost
+    ext, res = self._run(0.01, v=7.0)
+    self.assertFalse(ext.bp_curvature_deviation_limited)
+    self.assertAlmostEqual(ext.unwind_gain_scale, 1.0)
+
+  def test_cap_eases_in(self):
+    CP = _explorer_cp()
+    ext = _Harness(CP)
+    ext.human_turn_detector = _ForcedDetector(False)
+    ext.model = _Model()
+    cs = _CS(vEgoRaw=self.V, vEgo=self.V, yawRate=-self.MEAS * self.V)
+    scales = []
+    for _ in range(12):
+      ext.update_angle_strategy(_CC(), cs, _Actuators(curvature=0.0), CP)
+      scales.append(ext.unwind_gain_scale)
+    steps = [a - b for a, b in zip(scales[:-1], scales[1:], strict=True)]
+    self.assertTrue(all(-1e-9 <= d <= 0.05 + 1e-9 for d in steps))
+    self.assertAlmostEqual(scales[-1], 1.0 / 1.3, places=6)

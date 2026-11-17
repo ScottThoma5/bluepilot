@@ -213,6 +213,9 @@ class LateralAngleExt:
     self.stall_blip_count = 0         # pulses fired this stall episode
     self.angle_stall_blip_active = False
     self.press_timer_s = 0.0          # continuous steeringPressed time, for the hand-off blip
+    # explorer-st-unwind2: path_angle gain cap while the deviation clip holds kappa in the turn
+    self.unwind_gain_scale = 1.0
+    self._unwind_clip_bound = False
 
   def update_angle_params(self, params):
     """Sets per-platform gain defaults and reads user angle-tuning params."""
@@ -285,6 +288,7 @@ class LateralAngleExt:
     precision = 1
 
     if not CC.latActive:
+      self.unwind_gain_scale = 1.0
       self.path_angle_last = 0.0
       self.bp_path_angle_final = 0.0
       self.apply_curvature_last = 0.0
@@ -538,6 +542,25 @@ class LateralAngleExt:
 
     # As the curve gets bigger, we will need a little boost to the signal to to not understeer
     self.curvature_factor = interp(abs(kappa_cmd), [0.0007, 0.001], [self.low_gain_calc, self.high_gain_calc])
+
+    # BluePilot explorer-st-unwind2: no >1 boost on a kappa the deviation clip is holding IN the turn.
+    # Above 9 m/s kappa_cmd is pinned to measured +/- CURVATURE_ERROR. When the model wants LESS turn
+    # than that (turn exit, or a reversal past straight), kappa_cmd sits at measured - 0.002 (toward
+    # the turn) and the boost then asks the PSCM for up to 1.3x (1.725x at highway with a 1.5 user
+    # factor) of that: whenever the PSCM delivers more than 1/boost of the request, the car's next
+    # measured curvature is larger than this frame's -- loop gain > 1, the command can only climb, and
+    # the car is held/tightened in the turn until the driver takes over (closed-loop sim: up to 6 s,
+    # both directions). Capping the factor at the low-curvature gain (<= 1.0) on those frames makes
+    # the loop contract. kappa_cmd -- and so the shadow sent to ford.h -- is unchanged; path_angle
+    # only gets smaller (toward straight), and the soft ROC below still bounds how fast it moves.
+    self._unwind_clip_bound = False
+    if self.bp_curvature_deviation_limited:
+      self._unwind_clip_bound = kappa_cmd * (_kappa_cmd_pre_error_clip - kappa_cmd) < 0.0
+    _scale_target = (min(self.curvature_factor, 1.0) / max(self.curvature_factor, 1e-3)) if self._unwind_clip_bound else 1.0
+    # Ease the cap in/out (0.05 per 20 Hz call) so a flickering clip can't chatter the path angle; the
+    # normal low/high gain switch above is untouched when the clip isn't holding the command in the turn.
+    self.unwind_gain_scale = float(clip(_scale_target, self.unwind_gain_scale - 0.05, self.unwind_gain_scale + 0.05))
+    self.curvature_factor *= self.unwind_gain_scale
 
     path_angle_calc = kappa_cmd * v_ego * self.curvature_factor
     path_angle = path_angle_calc
